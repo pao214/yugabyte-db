@@ -2404,7 +2404,7 @@ DefineIndex(Oid relationId,
 				StartTransactionCommand();
 
 				if (yb_should_run_in_autonomous_transaction)
-					YBIncrementDdlNestingLevel(YB_DDL_MODE_VERSION_INCREMENT);
+					YbIncrementDdlNestingLevelForIndexPhase(YB_DDL_MODE_VERSION_INCREMENT);
 				else
 					YBAddDdlTxnState(YB_DDL_MODE_VERSION_INCREMENT);
 
@@ -2504,7 +2504,7 @@ YbDefineIndexHelper(Oid relationId,
 	StartTransactionCommand();
 
 	if (yb_should_run_in_autonomous_transaction)
-		YBIncrementDdlNestingLevel(YB_DDL_MODE_VERSION_INCREMENT);
+		YbIncrementDdlNestingLevelForIndexPhase(YB_DDL_MODE_VERSION_INCREMENT);
 	else
 		YBAddDdlTxnState(YB_DDL_MODE_VERSION_INCREMENT);
 
@@ -2539,7 +2539,7 @@ YbDefineIndexHelper(Oid relationId,
 	StartTransactionCommand();
 
 	if (yb_should_run_in_autonomous_transaction)
-		YBIncrementDdlNestingLevel(YB_DDL_MODE_VERSION_INCREMENT);
+		YbIncrementDdlNestingLevelForIndexPhase(YB_DDL_MODE_VERSION_INCREMENT);
 	else
 		YBAddDdlTxnState(YB_DDL_MODE_VERSION_INCREMENT);
 

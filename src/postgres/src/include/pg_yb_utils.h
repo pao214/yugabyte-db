@@ -1198,6 +1198,7 @@ typedef enum YbDdlMode
 } YbDdlMode;
 
 void		YBIncrementDdlNestingLevel(YbDdlMode mode);
+void		YbIncrementDdlNestingLevelForIndexPhase(YbDdlMode mode);
 void		YBDecrementDdlNestingLevel();
 
 extern void YBAddDdlTxnState(YbDdlMode mode);

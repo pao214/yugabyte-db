@@ -2953,8 +2953,34 @@ YbLockDatabaseForGlobalDdl(void)
 					   *YBCGetGFlags()->ysql_enable_concurrent_ddl ? ShareLock : ExclusiveLock);
 }
 
+static void YbIncrementDdlNestingLevelInternal(YbDdlMode mode,
+											   bool lock_database);
+
 void
 YBIncrementDdlNestingLevel(YbDdlMode mode)
+{
+	YbIncrementDdlNestingLevelInternal(mode, true /* lock_database */ );
+}
+
+/*
+ * For the phases of a CREATE INDEX after its first, which wait for backends
+ * to reach the new catalog version while in DDL state. A DDL with global
+ * object locks from a backend still on the old version waits on the database
+ * lock, and that wait is not a lock wait the deadlock detector can see, so
+ * holding the lock here would block both until one times out. The statement
+ * took the lock for its first phase.
+ *
+ * TODO(#32224): the later phases are not serialized with DDLs with global
+ * object locks in the same database.
+ */
+void
+YbIncrementDdlNestingLevelForIndexPhase(YbDdlMode mode)
+{
+	YbIncrementDdlNestingLevelInternal(mode, false /* lock_database */ );
+}
+
+static void
+YbIncrementDdlNestingLevelInternal(YbDdlMode mode, bool lock_database)
 {
 	if (YBIsDdlTransactionBlockEnabled() && IsTransactionBlock())
 	{
@@ -2976,7 +3002,8 @@ YBIncrementDdlNestingLevel(YbDdlMode mode)
 
 		MemoryContextSwitchTo(ddl_transaction_state.mem_context);
 		ddl_transaction_state.use_regular_txn_block = false;
-		YbLockDatabaseForLegacyDdl();
+		if (lock_database)
+			YbLockDatabaseForLegacyDdl();
 		HandleYBStatus(YBCPgEnterSeparateDdlTxnMode());
 
 		if (yb_force_catalog_update_on_next_ddl)
