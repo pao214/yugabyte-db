@@ -2347,6 +2347,57 @@ TEST_F(PgObjectLocksTestConcurrentDdlDisabled, DatabaseLockDoesNotCrossDatabases
   ASSERT_OK(holder.Execute("COMMIT"));
 }
 
+// A legacy CREATE INDEX waits, between its phases, for every backend in the database to reach its
+// new catalog version. A backend whose transaction with global object locks started before the
+// index's first phase stays on the old version, so the CREATE INDEX waits for that transaction. A
+// DDL in that transaction must still get the database lock from PR #38710: the CREATE INDEX must
+// not hold it while it waits, or the two block each other until one times out.
+class PgObjectLocksTestWithAsh : public PgObjectLocksTestMixModeDuringPromotion {
+ protected:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* opts) override {
+    PgObjectLocksTestMixModeDuringPromotion::UpdateMiniClusterOptions(opts);
+    // The test reads the CREATE INDEX's wait for backends from ASH.
+    opts->extra_tserver_flags.emplace_back("--ysql_yb_enable_ash=true");
+  }
+};
+
+TEST_F(PgObjectLocksTestWithAsh, GlobalDdlRunsWhileLegacyCreateIndexWaitsForBackends) {
+  auto* ts1 = cluster_->tablet_server(0);
+  auto* ts2 = cluster_->tablet_server(1);
+  {
+    auto conn = ASSERT_RESULT(LibPqTestBase::ConnectToTs(*ts1));
+    ASSERT_OK(conn.Execute("CREATE TABLE t(k INT PRIMARY KEY, v INT)"));
+    ASSERT_OK(conn.Execute("INSERT INTO t SELECT generate_series(1, 10), 0"));
+    ASSERT_OK(conn.Execute("CREATE TABLE other(k INT PRIMARY KEY)"));
+  }
+  WaitForCatalogVersionToPropagate();
+
+  ASSERT_OK(cluster_->SetFlag(ts2, "ysql_yb_enable_global_object_locking_infra", "true"));
+  // Its backend stays on the current catalog version while the transaction is open.
+  auto global_conn = ASSERT_RESULT(LibPqTestBase::ConnectToTs(*ts2));
+  ASSERT_OK(global_conn.ExecuteFormat("SET statement_timeout = '$0s'", 10 * kTimeMultiplier));
+  ASSERT_OK(global_conn.Execute("BEGIN"));
+  ASSERT_EQ(ASSERT_RESULT(global_conn.FetchRow<int64_t>("SELECT COUNT(*) FROM other")), 0);
+
+  // ts1 is not promoted, so the CREATE INDEX runs its phases in separate DDL transactions.
+  auto legacy_conn = ASSERT_RESULT(LibPqTestBase::ConnectToTs(*ts1));
+  auto index_future = std::async(std::launch::async, [&legacy_conn]() {
+    return legacy_conn.Execute("CREATE INDEX t_v ON t(v)");
+  });
+  auto observer = ASSERT_RESULT(LibPqTestBase::ConnectToTs(*ts1));
+  ASSERT_OK(LoggedWaitFor([&observer]() -> Result<bool> {
+    auto waiting = observer.FetchRow<int64_t>(
+        "SELECT COUNT(*) FROM yb_active_session_history"
+        " WHERE wait_event_aux = 'WaitForBackendsCatalogVersion'");
+    return waiting.ok() && *waiting > 0;
+  }, 60s * kTimeMultiplier, "the CREATE INDEX to wait for backends"));
+
+  // A DDL with global object locks in the same database, from the lagging backend.
+  ASSERT_OK(global_conn.Execute("ALTER TABLE other ADD COLUMN c INT"));
+  ASSERT_OK(global_conn.Execute("COMMIT"));
+  ASSERT_OK(index_future.get());
+}
+
 // A DDL with global object locks must see a DDL in a separate DDL transaction that committed before
 // it, though only the heartbeat brings the other DDL's catalog version to its node (PR #38710). The
 // longer heartbeat keeps ts2 behind for a while after the first DDL commits. The wait that covers
