@@ -140,6 +140,8 @@ TableId GetPgsqlTableIdInternal(
   return UuidToString(&id);
 }
 
+} // namespace
+
 bool IsYsqlCatalogTable(TableIdView table_id) {
   if (!IsPgsqlId(table_id)) {
     return false;
@@ -153,8 +155,6 @@ bool IsYsqlCatalogTable(TableIdView table_id) {
 
   return *oid_res < kPgFirstNormalObjectId;
 }
-
-} // namespace
 
 NamespaceId GetPgsqlNamespaceId(const uint32_t database_oid) {
   uuid id = boost::uuids::nil_uuid();

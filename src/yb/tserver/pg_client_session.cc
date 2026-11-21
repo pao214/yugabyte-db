@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <ostream>
@@ -46,6 +47,7 @@
 #include "yb/common/cdr_metadata.h"
 #include "yb/common/common.pb.h"
 #include "yb/common/common_util.h"
+#include "yb/common/entity_ids.h"
 #include "yb/common/pgsql_error.h"
 #include "yb/common/ql_type.h"
 #include "yb/common/ql_value.h"
@@ -1761,6 +1763,17 @@ struct GetOpTablespaceOid {
   template <class PB>
   PgTablespaceOid operator()(const PB& op) const {
     return op.has_write() ? op.write().tablespace_oid() : op.read().tablespace_oid();
+  }
+};
+
+// Catalog reads leave a transaction's locality alone, as catalog object locks do: otherwise every
+// catalog cache miss makes a tablespace-local transaction global. A row-locking catalog read
+// writes intents, so it still counts.
+struct IsCatalogReadWithoutIntents {
+  template <class PB>
+  bool operator()(const PB& op) const {
+    return op.has_read() && IsYsqlCatalogTable(op.read().table_id()) &&
+           !IsValidRowMarkType(GetRowMarkTypeFromPB(op.read()));
   }
 };
 
@@ -4917,14 +4930,17 @@ class PgClientSession::Impl {
     return transaction_provider_.NextTxnMetaForPlain(locality, deadline);
   }
 
-  TransactionFullLocality GetTargetTransactionLocality(const PgPerformRequestPB& request) const {
+  template <class PerformRequestPB>
+  requires std::same_as<PerformRequestPB, PgPerformRequestPB> ||
+           std::same_as<PerformRequestPB, LWPgPerformRequestPB>
+  TransactionFullLocality GetTargetTransactionLocality(const PerformRequestPB& request) const {
+    auto ops = request.ops() | std::views::filter(std::not_fn(IsCatalogReadWithoutIntents()));
+    // Same locality as a catalog object lock gets in DoAcquireObjectLock.
+    if (!request.ops().empty() && std::ranges::empty(ops)) {
+      return TransactionFullLocality::RegionLocal();
+    }
     return GetTargetTransactionLocality(
-        request.options(), request.ops() | std::views::transform(GetOpTablespaceOid()));
-  }
-
-  TransactionFullLocality GetTargetTransactionLocality(const LWPgPerformRequestPB& request) const {
-    return GetTargetTransactionLocality(
-        request.options(), request.ops() | std::views::transform(GetOpTablespaceOid()));
+        request.options(), ops | std::views::transform(GetOpTablespaceOid()));
   }
 
   TransactionFullLocality GetTargetTransactionLocality(

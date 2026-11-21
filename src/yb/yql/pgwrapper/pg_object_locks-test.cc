@@ -3362,10 +3362,12 @@ class PgObjectLocksGlobalLockPromotionTest : public client::GeoTransactionsTestB
   }
 
   Status ExpectLastTxnStatusTablet(std::string_view tablespace, client::ExpectedLocality locality) {
-    auto expected = VERIFY_RESULT(GetStatusTablets(tablespace, locality));
-    SCHECK(!expected.empty(), IllegalState, "No status tablets for the expected locality");
+    // Read the last transaction first: GetStatusTablets opens a connection, whose catalog lock
+    // takes a new transaction from the pool.
     auto last_transaction = transaction_pool_->TEST_GetLastTransaction();
     SCHECK(last_transaction, IllegalState, "No transaction recorded by the pool");
+    auto expected = VERIFY_RESULT(GetStatusTablets(tablespace, locality));
+    SCHECK(!expected.empty(), IllegalState, "No status tablets for the expected locality");
     auto metadata = last_transaction->GetMetadata(TransactionRpcDeadline()).get();
     RETURN_NOT_OK(metadata);
     SCHECK(
@@ -3441,6 +3443,22 @@ TEST_P(PgObjectLocksGlobalLockPromotionTest, CatalogLocksDoNotPromote) {
   ASSERT_OK(SetupPromotionCluster());
   auto conn = ASSERT_RESULT(Connect());
   ASSERT_OK(PrepareLocalSession(conn));
+  ASSERT_OK(conn.StartTransaction(IsolationLevel::SNAPSHOT_ISOLATION));
+  ASSERT_OK(conn.Execute("UPDATE t1_1 SET v = v + 1 WHERE k = 1"));
+  ASSERT_RESULT(conn.Fetch("SELECT proname FROM pg_proc LIMIT 1"));
+  ASSERT_OK(ExpectLastTxnStatusTablet("tablespace1", client::ExpectedLocality::kLocal));
+  ASSERT_OK(conn.CommitTransaction());
+}
+
+// #37802: with region-based placement, a catalog read must not make a region-local transaction
+// global either. Same scenario as CatalogLocksDoNotPromote, with tablespace-based placement off and
+// no yb_force_tablespace_locality: UPDATE a region 1 table, then miss the catalog cache; the
+// transaction must stay on a region 1 status tablet.
+TEST_P(PgObjectLocksGlobalLockPromotionTest, CatalogReadsDoNotPromoteRegionLocal) {
+  ASSERT_OK(SetupPromotionCluster());
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_use_tablespace_based_transaction_placement) = false;
+  auto conn = ASSERT_RESULT(Connect());
+  ASSERT_OK(WarmupTablespaceCache(conn, "t1_1"));
   ASSERT_OK(conn.StartTransaction(IsolationLevel::SNAPSHOT_ISOLATION));
   ASSERT_OK(conn.Execute("UPDATE t1_1 SET v = v + 1 WHERE k = 1"));
   ASSERT_RESULT(conn.Fetch("SELECT proname FROM pg_proc LIMIT 1"));

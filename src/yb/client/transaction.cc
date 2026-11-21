@@ -15,6 +15,7 @@
 
 #include "yb/client/transaction.h"
 
+#include <algorithm>
 #include <atomic>
 #include <set>
 #include <unordered_map>
@@ -25,6 +26,7 @@
 #include "yb/client/client.h"
 #include "yb/client/in_flight_op.h"
 #include "yb/client/meta_cache.h"
+#include "yb/client/table.h"
 #include "yb/client/transaction_cleanup.h"
 #include "yb/client/transaction_manager.h"
 #include "yb/client/transaction_rpc.h"
@@ -32,6 +34,7 @@
 
 #include "yb/common/advisory_locks_error.h"
 #include "yb/common/common.pb.h"
+#include "yb/common/entity_ids.h"
 #include "yb/common/transaction.h"
 #include "yb/common/transaction_error.h"
 
@@ -803,7 +806,15 @@ class YBTransaction::Impl final : public internal::TxnBatcherIf {
     if (metadata_.locality.IsGlobal()) {
       return nullptr;
     }
+    const auto isolation = metadata_.isolation;
     for (auto& group : ops_info->groups) {
+      // Catalog reads leave the locality alone, as on the tserver side (pg_client_session.cc).
+      if (std::all_of(group.begin, group.end, [isolation](const auto& op) {
+            return IsYsqlCatalogTable(op.yb_op->table()->id()) &&
+                   !op.yb_op->should_apply_intents(isolation);
+          })) {
+        continue;
+      }
       auto& first_op = *group.begin;
       switch (metadata_.locality.locality) {
         case TransactionLocality::REGION_LOCAL:

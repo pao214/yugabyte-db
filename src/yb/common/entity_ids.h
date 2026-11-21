@@ -115,6 +115,9 @@ Result<TableId> GetRestoreTargetTableIdUsingRelfilenode(
 // NOTE: Only catalog table oids are allowed.
 TableId GetPriorVersionYsqlCatalogTableId(uint32_t database_oid, uint32_t table_oid);
 
+// Whether the table is a YSQL catalog table, of either version.
+bool IsYsqlCatalogTable(TableIdView table_id);
+
 // If this is a YSQL catalog table, then is it the previous version?
 // Returns false for user tables.
 bool IsPriorVersionYsqlCatalogTable(const TableId& table_id);
